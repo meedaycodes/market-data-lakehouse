@@ -39,6 +39,8 @@ from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import BooleanType, StringType, StructField, StructType, TimestampType
 
+from ingestion import delta_tables
+
 SCD2_FIELDS = [
     StructField("row_hash", StringType(), nullable=False),
     StructField("valid_from", TimestampType(), nullable=False),
@@ -64,30 +66,15 @@ def hash_columns(columns: list[str]) -> Column:
 
 
 def ensure_table(spark: SparkSession, path: str, schema: StructType) -> bool:
-    """Create the table with an explicit schema if it isn't there. True if created.
+    """Create an SCD2 table if it isn't there. True if created.
 
-    NOT NULL columns in `schema` become constraints Delta enforces on every
-    write; the CHECK below makes an inverted interval -- valid_to before
-    valid_from, e.g. from a run with a wrong clock -- a failed write instead
-    of a silently corrupt history.
+    The CHECK makes an inverted interval -- valid_to before valid_from, e.g.
+    from a run with a wrong clock -- a failed write instead of a silently
+    corrupt history.
     """
-    if DeltaTable.isDeltaTable(spark, path):
-        existing = set(spark.read.format("delta").load(path).columns)
-        expected = {f.name for f in schema.fields}
-        if existing != expected:
-            raise ValueError(
-                f"Delta table at {path} has a different schema than this code writes.\n"
-                f"  missing: {sorted(expected - existing)}\n  unexpected: {sorted(existing - expected)}\n"
-                "If it's the old overwrite-mode table it holds no history worth keeping: delete the folder and rerun."
-            )
-        return False
-
-    DeltaTable.createIfNotExists(spark).location(path).addColumns(schema).execute()
-    spark.sql(
-        f"ALTER TABLE delta.`{path}` ADD CONSTRAINT valid_interval "
-        "CHECK (valid_to IS NULL OR valid_to > valid_from)"
+    return delta_tables.ensure_table(
+        spark, path, schema, constraints={"valid_interval": "valid_to IS NULL OR valid_to > valid_from"}
     )
-    return True
 
 
 def merge_snapshot(spark: SparkSession, snapshot: DataFrame, path: str, key: str, observed_at: datetime) -> dict:

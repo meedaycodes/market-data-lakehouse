@@ -43,6 +43,7 @@ import requests
 import yfinance as yf
 from dotenv import load_dotenv
 
+from ingestion import paths
 from ingestion.security_master_table import ATTRIBUTE_COLUMNS
 from reference_data.openfigi import figi_job, map_jobs
 from reference_data.symbology import from_figi, match_key, to_alpaca, to_yahoo
@@ -54,9 +55,7 @@ SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 CONTACT_EMAIL = os.getenv("SEC_CONTACT_EMAIL", "you@example.com")
 USER_AGENT = f"market-lakehouse research project ({CONTACT_EMAIL})"
 
-DELTA_TABLE_PATH = os.getenv(
-    "SECURITY_MASTER_PATH", "/home/jovyan/work/data/lakehouse/reference/security_master"
-)
+DELTA_TABLE_PATH = paths.SECURITY_MASTER
 
 # Columns each vendor fetch fills. When a fetch fails, these are unknown --
 # not empty -- and get carried forward from the last good version.

@@ -26,6 +26,7 @@ Airflow. A 5-year backfill seeds history.
 | 5 | Silver key | (`security_id`, `trade_date`, `source`); vendors side by side | One merged "best" price |
 | 6 | Price basis | Unadjusted prices + separate corporate actions; adjust as-of in gold | Vendor-adjusted series |
 | 7 | Partitioning | None until a partition would reach ~1 GB | Partition by `trade_date` |
+| 8 | File sizing | Prevent small files at write time (`coalesce(1)`, one file per run) | Scheduled `OPTIMIZE` / auto compaction |
 
 ## Why
 
@@ -72,6 +73,16 @@ flag it.
 **7 — No partitioning.** Silver grows ~40k rows/year. Date partitions would
 mean thousands of tiny files, which costs Spark more than scanning a small
 table; Delta's file statistics already skip irrelevant files.
+
+**8 — Prevent, don't compact.** A DataFrame built from a Python list is
+split across every local core, so the first bronze loads wrote 80 rows as
+10 files (~2,500 files/year per table at one run a day). `coalesce(1)` makes
+each run one file, and a run is a few hundred KB, so there's nothing left
+for `OPTIMIZE` to fix. Delta 3.2's `OPTIMIZE` treats any file under 1 GB as
+small and bin-packs toward 1 GB; auto compaction (off by default) triggers at
+50 small files and targets 128 MB. Both are deferred to **Phase 3**, where a
+streaming query commits a small batch every few seconds and can't control
+file count at write time the way one batch run can.
 
 ## Joining to the security master
 

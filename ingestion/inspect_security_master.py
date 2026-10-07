@@ -6,17 +6,12 @@ For the guided version -- history, as-of queries, why each design choice was
 made -- open notebooks/01_security_master_tour.ipynb in Jupyter.
 """
 
-import os
 import sys
 
-from pyspark.sql import functions as F
-
-from ingestion import scd2
+from ingestion import paths, scd2
 from ingestion.spark import get_spark
 
-DELTA_TABLE_PATH = os.getenv(
-    "SECURITY_MASTER_PATH", "/home/jovyan/work/data/lakehouse/reference/security_master"
-)
+DELTA_TABLE_PATH = paths.SECURITY_MASTER
 
 
 def main() -> int:

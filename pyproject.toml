@@ -1,0 +1,18 @@
+# Makes the repo an installable package so `ingestion` and `reference_data`
+# import from anywhere -- a notebook in notebooks/, a test, an Airflow task --
+# without PYTHONPATH tricks. Dependencies stay in requirements.txt, which the
+# Docker image installs from; this file only declares the packages.
+#
+# Local setup:  uv venv --python 3.11 .venv && uv pip install -r requirements.txt -e . ipykernel
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-data-lakehouse"
+version = "0.2.0"
+requires-python = ">=3.11,<3.12"
+
+[tool.setuptools]
+packages = ["ingestion", "ingestion.bars", "reference_data"]
