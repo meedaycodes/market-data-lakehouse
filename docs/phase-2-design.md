@@ -98,8 +98,18 @@ the master's history starts 2026-10-07 anyway.
 human — but the fetch tasks use a trigger rule that runs as long as the
 security master table exists, so one bad row doesn't block 79 good ones.
 
-## Open questions
+## Resolved questions (checked live 2026-10-07)
 
-- [ ] How far back does Alpaca's free tier serve full-market (SIP) daily
-      bars? If less than 5 years, Yahoo covers the gap and the gap is recorded.
-- [ ] Exact Airflow 3.x release to pin.
+- [x] **Alpaca history depth.** The free tier serves SIP (full-market)
+      daily bars from **2016-01-04** — 5 years is well covered. But the IEX
+      feed only starts **2020-07-27** and covers a single exchange's trades,
+      so every request must set `feed=sip` explicitly; never rely on the
+      default feed.
+- [x] **Alpaca `adjustment=raw` is truly raw.** NVDA closed 1,208.88 on
+      2024-06-07 and 121.79 on 2024-06-10, with volume jumping ~8× at the
+      split — unadjusted prices *and* volumes.
+- [x] **Bar timestamps are New York midnight in UTC** (`2024-06-07
+      04:00:00+00:00`; 05:00 in winter). `trade_date` must be derived in
+      `America/New_York`, never by truncating the UTC timestamp — a habit
+      that breaks silently for any feed stamped later in the day.
+- [x] **Airflow pin: 3.3.2** (latest, released 2026-09-17; Python ≥ 3.10).
