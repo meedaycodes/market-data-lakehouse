@@ -1,0 +1,25 @@
+# Phase 1 only needs this one service: a Spark + Delta Lake + Jupyter
+# environment for building and querying the security master. Streaming
+# (Redpanda, phase 3) and orchestration (Airflow, phase 2) get added as their
+# own services in later phases -- no point standing up infrastructure a phase
+# doesn't use yet.
+#
+# No top-level `version:` key: Compose v2 ignores it and warns.
+
+services:
+  lakehouse:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: market-lakehouse
+    ports:
+      - "8888:8888"  # Jupyter Lab
+      - "4040:4040"  # Spark UI (while a job is running)
+    volumes:
+      - .:/home/jovyan/work
+    env_file:
+      # Optional so the offline tests run on a fresh clone (or in CI) with no
+      # keys at all. The build itself still needs SEC_CONTACT_EMAIL set.
+      - path: .env
+        required: false
+    command: start-notebook.sh --NotebookApp.token=''
