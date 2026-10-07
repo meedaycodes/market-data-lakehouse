@@ -1,18 +1,31 @@
-# Market Data Lakehouse — Phase 1: Security Master
+# Market Data Lakehouse
 
 The first of three projects: a cross-vendor market data lakehouse built on
 Delta Lake, with point-in-time correctness as the design constraint everything
-else has to survive. This phase builds the piece everything downstream joins
-against — a canonical security master reconciled across four independent
-sources that don't agree with each other on what to call the same company.
+else has to survive.
 
-## Why this phase first
+| Phase | What | Status |
+| --- | --- | --- |
+| 1 | Security master: FIGI-keyed, SCD2 history | Done |
+| 2 | Batch EOD bars: bronze → silver, Airflow | In progress: bronze done; silver, backfill, Airflow next ([design](docs/phase-2-design.md)) |
+| 3 | Streaming: Alpaca websocket → Redpanda → Structured Streaming | Planned |
+| 4 | Data quality: crossed quotes, gaps, vendor divergence | Planned |
+| 5 | Point-in-time gold layer | Planned |
+| 6–8 | CI/CD, Terraform, Kubernetes | Planned |
+
+## Phase 1: Security master
+
+The piece everything downstream joins against — a canonical security master
+reconciled across four independent sources that don't agree with each other
+on what to call the same company.
+
+### Why this phase first
 
 Every later phase (batch/streaming ingestion, data quality monitoring, the
 point-in-time gold layer) needs a stable identifier to join on. Get this
 wrong and every later join is quietly wrong too.
 
-## The design, and the failure each part prevents
+### The design, and the failure each part prevents
 
 | Decision | What goes wrong without it |
 | --- | --- |
@@ -81,6 +94,56 @@ corporate-actions feed — out of scope for Phase 1.
    the four spellings of BRK.B, a ticker change replayed in a sandbox, and
    as-of queries.
 
+## Phase 2: Batch EOD bars (in progress)
+
+Design and the reasoning behind each decision:
+[docs/phase-2-design.md](docs/phase-2-design.md).
+
+**Done — bronze.** Raw daily bars from Alpaca and Yahoo, one append-only
+Delta table per vendor, one row per vendor response, stored as received:
+
+```bash
+# one trading day (what the daily Airflow task will run)
+docker compose exec lakehouse python -m ingestion.bars.load_bronze --source alpaca --start 2026-10-05 --end 2026-10-05
+docker compose exec lakehouse python -m ingestion.bars.load_bronze --source yahoo  --start 2026-10-05 --end 2026-10-05
+```
+
+- Securities come from the security master's current rows, so every bronze
+  row is tagged with `security_id` when it's written.
+- Alpaca is called through its REST API with `feed=sip` and
+  `adjustment=raw` on every request; the payload is the response text,
+  untouched. Yahoo is stored as yfinance's full output plus the library
+  version.
+- A range with no NYSE sessions (weekend, holiday) exits 0 with nothing to
+  fetch. Any failed security exits 1; the rest are still written.
+- Each run writes one file (`coalesce(1)`), so batch never needs `OPTIMIZE`.
+
+`notebooks/02_lakehouse_tables.ipynb` shows every table in the lakehouse —
+row counts, files, schemas, commit history — and the two vendors side by
+side.
+
+**Next:** silver (typed, deduplicated, `MERGE` latest-wins), the 5-year
+backfill, then the Airflow DAG.
+
+## Running locally (optional)
+
+Docker is the reference environment. For running notebooks in VS Code and
+getting editor autocomplete, a local virtualenv mirrors it:
+
+```bash
+uv venv --python 3.11 .venv
+uv pip install -r requirements.txt -e . ipykernel
+```
+
+Then in VS Code pick `.venv` as the notebook kernel. You need Java (17 is
+what the container uses; 19 also works) for Spark. Tables are found at
+`<repo>/data/lakehouse` in both environments, so the notebooks read the same
+data the container wrote.
+
+Two things keep the environments from drifting: `requirements.txt` pins
+pandas/numpy/pyarrow to what the Docker image ships, and `ingestion/spark.py`
+starts Spark's Python workers with the driver's own interpreter.
+
 ## Maintaining the universe
 
 ```bash
@@ -95,7 +158,7 @@ It prints rather than edits: the universe defines what the whole lakehouse
 tracks, so changes go through a reviewed diff. A rename needs no action — the
 build picks up the new ticker and records it as history.
 
-## What "done" looks like for this phase
+## What "done" looks like for Phase 1
 
 - A `security_master` Delta table with one current row per security, keyed
   on composite FIGI, with `issuer_id` populated for every row (BRK.B and BF.B
@@ -116,11 +179,16 @@ table's history was minutes old, the fix was to delete it and rebuild. On a
 table with real history you'd correct the column in place instead: SCD2
 versions record changes in the world, and a pipeline bug fix isn't one.
 
+Bronze, validated the same day: one trading day (2026-10-05) loaded from
+both vendors, 80 of 80 securities each; a weekend range exited cleanly with
+nothing to fetch. Closes agreed to the cent across vendors for all 80;
+volumes didn't — Alpaca's is consistently 0.5–0.8% higher, a systematic
+difference Phase 4 should treat as expected rather than as an error.
+
 ## What's next
 
-- **Phase 2:** batch EOD ingestion from Alpaca + yfinance into a
-  bronze/silver Delta layer, joined against this security master on
-  `security_id`, orchestrated by **Apache Airflow** (decided 2026-10-07).
+- **Phase 2 (remaining):** silver, backfill, and orchestration by
+  **Apache Airflow** (decided 2026-10-07).
   Airflow over Dagster: it's the most widely deployed orchestrator, it has
   an official Helm chart for Phase 8's Kubernetes deployment, and its
   task-based model makes the dependencies explicit (security master →
@@ -141,9 +209,12 @@ versions record changes in the world, and a pipeline bug fix isn't one.
 market-lakehouse/
 ├── docker-compose.yml          # the whole local dev environment
 ├── docker/Dockerfile           # Spark + Delta + Jupyter image
-├── requirements.txt
+├── requirements.txt            # pinned to match the Docker image
+├── pyproject.toml              # makes the repo installable (local .venv)
 ├── pytest.ini
 ├── .env.example
+├── docs/
+│   └── phase-2-design.md       # Phase 2 architecture decision record
 ├── reference_data/
 │   ├── universe.py             # the ~80 securities, keyed by FIGI
 │   ├── symbology.py            # each vendor's ticker spelling
@@ -154,9 +225,17 @@ market-lakehouse/
 │   ├── inspect_security_master.py
 │   ├── security_master_table.py  # schema + read/write
 │   ├── scd2.py                 # reusable SCD Type 2 merge + as-of
-│   └── spark.py                # shared SparkSession (UTC)
+│   ├── delta_tables.py         # create tables from explicit schemas
+│   ├── paths.py                # every table location, one root
+│   ├── spark.py                # shared SparkSession (UTC, worker Python)
+│   └── bars/
+│       ├── fetch.py            # raw vendor responses (Alpaca REST, yfinance)
+│       ├── bronze.py           # append-only bronze tables
+│       └── load_bronze.py      # CLI: one vendor, one date range
 ├── tests/                      # offline; synthetic vendor data
 ├── quality/                    # phase 4
 ├── notebooks/                  # exploration; commit with outputs cleared
+│   ├── 01_security_master_tour.ipynb
+│   └── 02_lakehouse_tables.ipynb
 └── data/                       # Delta tables land here (gitignored)
 ```

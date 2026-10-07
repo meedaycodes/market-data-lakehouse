@@ -1,9 +1,15 @@
 pyspark==3.5.1
 delta-spark==3.2.0
-pandas>=2.0
+# Pinned to what the Docker base image ships and the tests run against.
+# A bare `pandas>=2.0` resolved to 2.0.3 in the container but 3.x in a fresh
+# .venv -- and PySpark 3.5's pandas conversion is built for pandas 2 / numpy 1.
+pandas==2.0.3
+numpy==1.26.4
+pyarrow==17.0.0
 requests>=2.31
 python-dotenv>=1.0
 yfinance>=0.2.40
 alpaca-py>=0.30
 great-expectations>=0.18
 pytest>=8.0
+exchange_calendars>=4.5
