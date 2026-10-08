@@ -7,7 +7,7 @@ else has to survive.
 | Phase | What | Status |
 | --- | --- | --- |
 | 1 | Security master: FIGI-keyed, SCD2 history | Done |
-| 2 | Batch EOD bars: bronze → silver, Airflow | In progress: bronze and silver done; backfill, Airflow next ([design](docs/phase-2-design.md)) |
+| 2 | Batch EOD bars: bronze → silver, Airflow | In progress: bronze, silver, 5-year backfill done; Airflow next ([design](docs/phase-2-design.md)) |
 | 3 | Streaming: Alpaca websocket → Redpanda → Structured Streaming | Planned |
 | 4 | Data quality: crossed quotes, gaps, vendor divergence | Planned |
 | 5 | Point-in-time gold layer | Planned |
@@ -128,7 +128,8 @@ docker compose exec lakehouse python -m ingestion.bars.check_completeness --star
 
 - `silver/daily_bars`: one row per (`security_id`, `trade_date`, `source`).
   Prices are `DECIMAL(18,4)` (Yahoo's `504.2600097656` becomes `504.2600`);
-  `price_basis` is `raw` for Alpaca, `split_adjusted` for Yahoo;
+  `price_basis` is `raw` for Alpaca, `vendor_adjusted` for Yahoo (adjusted
+  for splits *and* spin-offs);
   `trade_date` is the New York date.
 - `silver/corporate_actions`: dividends and splits from Yahoo, for gold to
   adjust prices as-of a date.
@@ -144,7 +145,22 @@ docker compose exec lakehouse python -m ingestion.bars.check_completeness --star
 row counts, files, schemas, commit history — and the two vendors side by
 side. Silver tables appear in its catalog automatically.
 
-**Next:** the 5-year backfill, then the Airflow DAG.
+**Done — 5-year backfill.** One command runs the same steps the daily DAG
+will (bronze for both vendors → silver → reorganizations → completeness):
+
+```bash
+docker compose exec lakehouse python -m ingestion.bars.backfill   # 5 years to the last completed session
+```
+
+Ran 2026-10-07 in ~2.5 minutes: 2021-10-06..2026-10-06, 1,255 sessions,
+100,400 bars per vendor, 1,336 Yahoo dividends/splits, 3 reorganizations,
+0 bars missing. LIN, BLK and XOM were reorganized inside the window; their
+earlier bars carry today's FIGI, and each reorg is recorded with its SEC
+filing (`reference_data/reorganizations.py`). The backfill also showed that
+Yahoo adjusts for spin-offs as well as splits — findings in the
+[design doc](docs/phase-2-design.md#backfill-findings-2021-10-06--2026-10-06).
+
+**Next:** the Airflow DAG.
 
 ## Running locally (optional)
 
@@ -238,6 +254,7 @@ market-lakehouse/
 │   └── phase-2-design.md       # Phase 2 architecture decision record
 ├── reference_data/
 │   ├── universe.py             # the ~80 securities, keyed by FIGI
+│   ├── reorganizations.py      # holding-company reorgs, with SEC 8-K12B evidence
 │   ├── symbology.py            # each vendor's ticker spelling
 │   ├── openfigi.py             # OpenFIGI client (batching, rate limits)
 │   └── resolve_figis.py        # helper for maintaining the universe
@@ -256,7 +273,9 @@ market-lakehouse/
 │       ├── load_bronze.py      # CLI: one vendor, one date range
 │       ├── silver.py           # parse bronze payloads -> typed rows
 │       ├── build_silver.py     # CLI: bronze -> silver for a date range
-│       └── check_completeness.py  # CLI: every expected bar present?
+│       ├── check_completeness.py  # CLI: every expected bar present?
+│       ├── load_reorganizations.py  # CLI: SEC-evidenced reorgs -> corporate_actions
+│       └── backfill.py         # CLI: bronze -> silver -> checks over a range
 ├── tests/                      # offline; synthetic vendor data
 ├── quality/                    # phase 4
 ├── notebooks/                  # exploration; commit with outputs cleared

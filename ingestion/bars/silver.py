@@ -14,9 +14,11 @@ Choices that make silver trustworthy downstream:
     most decimal amounts exactly, so sums and equality checks drift. VWAP
     keeps 6 places because Alpaca reports it that precisely.
   - `price_basis` says what the prices are: 'raw' for Alpaca, but
-    'split_adjusted' for Yahoo, whose "unadjusted" Close is still divided by
-    later splits (docs/phase-2-design.md, decision 6). Stated in the data,
-    not left to memory.
+    'vendor_adjusted' for Yahoo, whose "unadjusted" Close is still adjusted
+    by Yahoo's own rules -- for splits, and for spin-offs, which Yahoo
+    records as fractional "splits" (GE 1.281 on 2023-01-04). See
+    docs/phase-2-design.md, decisions 6 and 9. Stated in the data, not left
+    to memory.
   - trade_date is the New York calendar date of the bar's timestamp, never
     the UTC date.
   - Vendors stay side by side (`source` is part of the key). Their
@@ -71,10 +73,11 @@ CORPORATE_ACTIONS_SCHEMA = latest_wins.with_lineage_fields(
         [
             StructField("security_id", StringType(), nullable=False),
             StructField("ex_date", DateType(), nullable=False),
-            StructField("action_type", StringType(), nullable=False),  # 'dividend' | 'split'
+            StructField("action_type", StringType(), nullable=False),  # 'dividend' | 'split' | 'reorg'
             StructField("source", StringType(), nullable=False),
-            # dividend: cash per share; split: ratio (10.0 = 10-for-1)
-            StructField("value", DecimalType(18, 6), nullable=False),
+            # dividend: cash per share; split: ratio (10.0 = 10-for-1);
+            # reorg: NULL -- an identity change, with no verified price ratio
+            StructField("value", DecimalType(18, 6)),
         ]
     )
 )
@@ -150,13 +153,13 @@ def _yahoo_value(column: str) -> F.Column:
 
 
 def parse_yahoo(bronze: DataFrame) -> DataFrame:
-    """Yahoo bronze rows -> one row per bar. Prices are split-adjusted (Yahoo's Close)."""
+    """Yahoo bronze rows -> one row per bar. Prices are Yahoo-adjusted (splits and spin-offs)."""
     rows = _yahoo_rows(bronze)
     return rows.select(
         "security_id",
         new_york_date("t").alias("trade_date"),
         F.lit("yahoo").alias("source"),
-        F.lit("split_adjusted").alias("price_basis"),
+        F.lit("vendor_adjusted").alias("price_basis"),
         *(_yahoo_value(c).cast(PRICE).alias(c.lower()) for c in ["Open", "High", "Low", "Close"]),
         _yahoo_value("Volume").cast(LongType()).alias("volume"),
         F.lit(None).cast(VWAP).alias("vwap"),
@@ -167,7 +170,12 @@ def parse_yahoo(bronze: DataFrame) -> DataFrame:
 
 
 def parse_yahoo_actions(bronze: DataFrame) -> DataFrame:
-    """Non-zero Dividends / Stock Splits from Yahoo payloads."""
+    """Non-zero Dividends / Stock Splits from Yahoo payloads.
+
+    Kept exactly as Yahoo reports them: a 'split' row may really be a
+    spin-off (fractional ratio, e.g. GE 1.281). Classifying them needs a
+    better source than Yahoo and belongs in gold (Phase 5).
+    """
     rows = _yahoo_rows(bronze)
     actions = rows.select(
         "security_id",

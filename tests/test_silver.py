@@ -93,7 +93,7 @@ def test_yahoo_float_noise_becomes_exact_cents(bronze):
 
     (row,) = parse_yahoo(bronze("yahoo", BRK, "BRK-B", YAHOO_BRK, at(5))).collect()
     assert row.close == Decimal("504.2600")  # payload says 504.2600097656
-    assert row.price_basis == "split_adjusted"
+    assert row.price_basis == "vendor_adjusted"
     assert row.vwap is None and row.trade_count is None
 
 
