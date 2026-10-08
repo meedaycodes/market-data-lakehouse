@@ -16,5 +16,14 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 USER ${NB_UID}
 
+# Download the Delta Lake jars now, at build time, into ~/.ivy2. Otherwise
+# configure_spark_with_delta_pip fetches them from Maven every time a new
+# container starts -- and under Airflow every task is a new container, so
+# every task would repeat the download and fail whenever Maven is
+# unreachable. Baked in, a task starts with no network dependency on Maven.
+RUN python -c "from delta import configure_spark_with_delta_pip; \
+from pyspark.sql import SparkSession; \
+configure_spark_with_delta_pip(SparkSession.builder.master('local[1]')).getOrCreate().stop()"
+
 WORKDIR /home/jovyan/work
 ENV PYTHONPATH=/home/jovyan/work

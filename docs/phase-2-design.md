@@ -28,6 +28,8 @@ Airflow. A 5-year backfill seeds history.
 | 7 | Partitioning | None until a partition would reach ~1 GB | Partition by `trade_date` |
 | 8 | File sizing | Prevent small files at write time (`coalesce(1)`, one file per run) | Scheduled `OPTIMIZE` / auto compaction |
 | 9 | Reorganized securities (LIN, BLK, XOM) | Backfill under the successor FIGI; record each reorg as a `corporate_actions` row with SEC evidence | Map pre-reorg bars to predecessor FIGIs (deferred to Phase 5) |
+| 10 | Clocks | Airflow server in UTC; DAG schedule and trading date in `America/New_York` | Schedule in UTC or London time |
+| 11 | Run status | Watcher task (`one_failed`) fails the run if any task failed | Let leaf tasks decide (hides upstream failures) |
 
 ## Why
 
@@ -154,6 +156,50 @@ the master's history starts 2026-10-07 anyway.
 `refresh_security_master`. That stays — a quarantined security needs a
 human — but the fetch tasks use a trigger rule that runs as long as the
 security master table exists, so one bad row doesn't block 79 good ones.
+
+## Orchestration (step 5)
+
+**10 — Three clocks, one decides the date.** Airflow's server runs in UTC
+(how times are stored; it matches Spark's session), the developer works in
+London (only how the UI displays times — set per user), and the market's
+clock is New York. The schedule is `CronTriggerTimetable("30 18 * * 1-5",
+timezone="America/New_York")` and the trading date is the run time
+converted to New York (`airflow/dags/daily_bars_dates.py`). 18:30 New York
+is 22:30 or 23:30 UTC depending on US daylight saving, and because the US
+and UK change clocks on different Sundays it's 22:30 in London for ~4 weeks
+a year instead of 23:30 — so a UTC or London schedule drifts by an hour,
+and a run after ~19:00 New York would carry the next day's UTC date. A run
+timed before 17:00 New York without an explicit `trade_date` is refused, so
+a midday manual trigger can't load a half-finished bar that silver would
+later "revise".
+
+**11 — A watcher decides the run's status.** Airflow marks a run by its
+final tasks. Bronze, silver and completeness use `all_done` (an older master
+beats no bars; one vendor's bars beat none), so a failed master refresh
+would otherwise end in a green run. `fail_if_any_task_failed` runs only
+when something failed (`one_failed`) and fails the run when it does.
+
+**Infrastructure.** Adapted from the official Airflow 3.3.2 compose file:
+`LocalExecutor` (one machine needs no Celery/Redis), Postgres for Airflow's
+metadata, a separate DAG processor (new in Airflow 3), no triggerer. All
+behind the `airflow` compose profile. Airflow reaches Docker through
+`tecnativa/docker-socket-proxy`, which allows only the container and image
+APIs (volumes/networks return 403) — narrower than mounting the socket,
+though anything that can create containers can still mount host paths.
+Task containers bind-mount the project by its **host** path
+(`LAKEHOUSE_HOST_DIR`), since the Docker daemon resolves mounts on the host.
+The Delta jars are baked into the lakehouse image so a task never downloads
+from Maven.
+
+**Verified 2026-10-08** with `airflow dags test`:
+- logical date 2026-10-07 22:30 UTC → trading date 2026-10-07; all 6 tasks
+  succeeded (80 + 80 bars, 0 missing), no containers left behind;
+- logical date 2026-10-07 14:00 UTC (10:00 New York) → every dated task
+  refused, watcher fired, run **failed**. It took ~20 minutes because the
+  bronze tasks retried twice, 10 minutes apart: Airflow can't tell a
+  permanent error from a transient one.
+- A malformed `trade_date` is rejected before a run is created (the param's
+  `format: date` schema).
 
 ## Resolved questions (checked live 2026-10-07)
 

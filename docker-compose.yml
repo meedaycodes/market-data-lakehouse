@@ -1,16 +1,63 @@
-# Phase 1 only needs this one service: a Spark + Delta Lake + Jupyter
-# environment for building and querying the security master. Streaming
-# (Redpanda, phase 3) and orchestration (Airflow, phase 2) get added as their
-# own services in later phases -- no point standing up infrastructure a phase
-# doesn't use yet.
+# The local platform. Two groups of services:
+#
+#   docker compose up -d                      lakehouse only (Spark + Delta + Jupyter)
+#   docker compose --profile airflow up -d    lakehouse + Airflow (needs ~4 GB RAM)
+#
+# Airflow sits behind a profile so notebooks and tests don't pay for an
+# orchestrator they don't use. Streaming (Redpanda, phase 3) will join the
+# same way.
+#
+# The Airflow services are adapted from the official Airflow 3.3.2 compose
+# file (airflow.apache.org/docs/apache-airflow/3.3.2/docker-compose.yaml):
+# LocalExecutor instead of Celery (one machine needs no Redis or separate
+# workers), no triggerer (nothing in our DAGs defers), no example DAGs.
 #
 # No top-level `version:` key: Compose v2 ignores it and warns.
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.3.2  # already ships apache-airflow-providers-docker
+  profiles: [airflow]
+  env_file:
+    # Alpaca keys and SEC contact reach task containers from here (the DAG
+    # passes them on as private environment variables).
+    - path: .env
+      required: false
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: UTC  # server clock; schedules that follow the market set their own zone
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    # Local development values. Anything shared needs real secrets here.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-local-dev-only-jwt-secret}
+    AIRFLOW__API_AUTH__JWT_ISSUER: airflow
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # What the DAG needs to launch task containers (see airflow/dags/):
+    # the Docker API through the proxy, the image to run, and this project's
+    # path ON THE HOST -- bind mounts are resolved by the Docker daemon on
+    # the host, so a path inside the Airflow container would mount nothing.
+    LAKEHOUSE_DOCKER_URL: tcp://docker-socket-proxy:2375
+    LAKEHOUSE_IMAGE: market-lakehouse:latest
+    LAKEHOUSE_HOST_DIR: ${PWD}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
 
 services:
   lakehouse:
     build:
       context: .
       dockerfile: docker/Dockerfile
+    # A fixed image name, so Airflow's DockerOperator can launch task
+    # containers from the same image this service runs.
+    image: market-lakehouse:latest
     container_name: market-lakehouse
     ports:
       - "8888:8888"  # Jupyter Lab
@@ -23,3 +70,109 @@ services:
       - path: .env
         required: false
     command: start-notebook.sh --NotebookApp.token=''
+
+  # --- Airflow (profile: airflow) -------------------------------------------
+
+  postgres:
+    # Airflow's own metadata (runs, task states, users) -- not market data.
+    image: postgres:16
+    profiles: [airflow]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  docker-socket-proxy:
+    # Airflow never touches the Docker socket directly. This proxy exposes
+    # only the API sections DockerOperator uses -- containers and images --
+    # and refuses the rest (exec, volumes, networks, swarm, ...). It narrows
+    # the risk rather than removing it: anything that can create containers
+    # can still mount host paths. Fine for a laptop; Phase 8 replaces this
+    # with Kubernetes permissions.
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    profiles: [airflow]
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      INFO: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: always
+
+  airflow-init:
+    # One-off: create/upgrade Airflow's tables and the admin user, then exit.
+    <<: *airflow-common
+    command: version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-airflow}
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      # Host port 8081 by default (8080 is commonly taken on dev machines);
+      # inside the network it's still 8080. Override with AIRFLOW_HOST_PORT.
+      - "${AIRFLOW_HOST_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    # With LocalExecutor the scheduler also runs the tasks -- here that means
+    # asking Docker (via the proxy) to start lakehouse containers.
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+      docker-socket-proxy:
+        condition: service_started
+
+  airflow-dag-processor:
+    # Airflow 3 parses DAG files in their own process, so a broken DAG file
+    # can't take the scheduler down with it.
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  airflow-postgres:

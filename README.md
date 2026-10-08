@@ -7,7 +7,7 @@ else has to survive.
 | Phase | What | Status |
 | --- | --- | --- |
 | 1 | Security master: FIGI-keyed, SCD2 history | Done |
-| 2 | Batch EOD bars: bronze → silver, Airflow | In progress: bronze, silver, 5-year backfill done; Airflow next ([design](docs/phase-2-design.md)) |
+| 2 | Batch EOD bars: bronze → silver, Airflow | Done: bronze, silver, 5-year backfill, Airflow DAG ([design](docs/phase-2-design.md)) |
 | 3 | Streaming: Alpaca websocket → Redpanda → Structured Streaming | Planned |
 | 4 | Data quality: crossed quotes, gaps, vendor divergence | Planned |
 | 5 | Point-in-time gold layer | Planned |
@@ -160,7 +160,32 @@ filing (`reference_data/reorganizations.py`). The backfill also showed that
 Yahoo adjusts for spin-offs as well as splits — findings in the
 [design doc](docs/phase-2-design.md#backfill-findings-2021-10-06--2026-10-06).
 
-**Next:** the Airflow DAG.
+**Done — Airflow.** The `daily_bars` DAG runs the same commands every
+weekday at 18:30 New York time:
+
+```
+refresh_security_master ─┬─► bronze_alpaca ─┬─► build_silver ─► check_completeness
+                         └─► bronze_yahoo  ─┘
+                       (any failure anywhere) ─► fail_if_any_task_failed
+```
+
+```bash
+docker compose --profile airflow up -d     # lakehouse + Airflow (~4 GB RAM)
+docker compose --profile airflow down      # stop; Airflow's Postgres data is kept
+```
+
+- UI at **http://localhost:8081** (`airflow` / `airflow`, local dev only).
+  8081 because 8080 is often taken; override with `AIRFLOW_HOST_PORT`.
+  Set your display time zone in the UI's user menu — Airflow itself runs in
+  UTC, the schedule in New York time.
+- New DAGs start **paused**. Unpause `daily_bars` to start the schedule.
+- Manual run for a past day: *Trigger DAG* with config
+  `{"trade_date": "2026-10-07"}`. Without a date, a run triggered before
+  17:00 New York is refused rather than loading a half-finished bar.
+- Every task is a container from the `market-lakehouse` image, started
+  through a Docker socket proxy that only allows container and image calls.
+- Check the DAG's structure:
+  `docker compose --profile airflow exec -T airflow-scheduler python - < airflow/tests/check_daily_bars_dag.py`
 
 ## Running locally (optional)
 
@@ -224,8 +249,7 @@ difference Phase 4 should treat as expected rather than as an error.
 
 ## What's next
 
-- **Phase 2 (remaining):** silver, backfill, and orchestration by
-  **Apache Airflow** (decided 2026-10-07).
+- **Why Airflow (Phase 2, decided 2026-10-07):**
   Airflow over Dagster: it's the most widely deployed orchestrator, it has
   an official Helm chart for Phase 8's Kubernetes deployment, and its
   task-based model makes the dependencies explicit (security master →
@@ -245,7 +269,12 @@ difference Phase 4 should treat as expected rather than as an error.
 ```
 market-lakehouse/
 ├── docker-compose.yml          # the whole local dev environment
-├── docker/Dockerfile           # Spark + Delta + Jupyter image
+├── docker/Dockerfile           # Spark + Delta + Jupyter image (Delta jars baked in)
+├── airflow/
+│   ├── dags/
+│   │   ├── daily_bars.py       # the DAG: DockerOperator tasks running our CLIs
+│   │   └── daily_bars_dates.py # trading date = run time in New York
+│   └── tests/check_daily_bars_dag.py  # structure check, runs in the Airflow container
 ├── requirements.txt            # pinned to match the Docker image
 ├── pyproject.toml              # makes the repo installable (local .venv)
 ├── pytest.ini
