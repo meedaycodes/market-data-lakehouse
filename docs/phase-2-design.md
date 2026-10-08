@@ -27,6 +27,7 @@ Airflow. A 5-year backfill seeds history.
 | 6 | Price basis | Unadjusted prices + separate corporate actions; adjust as-of in gold | Vendor-adjusted series |
 | 7 | Partitioning | None until a partition would reach ~1 GB | Partition by `trade_date` |
 | 8 | File sizing | Prevent small files at write time (`coalesce(1)`, one file per run) | Scheduled `OPTIMIZE` / auto compaction |
+| 9 | Reorganized securities (LIN, BLK, XOM) | Backfill under the successor FIGI; record each reorg as a `corporate_actions` row with SEC evidence | Map pre-reorg bars to predecessor FIGIs (deferred to Phase 5) |
 
 ## Why
 
@@ -65,10 +66,11 @@ gold decides which to trust.
 and dividend, so past values change. A backtest on today's adjusted series
 sees splits that hadn't happened yet: look-ahead bias.
 Checked 2026-10-07: Yahoo's "unadjusted" `Close` is still **split-adjusted**
-(NVDA 2024-06-07 shows 120.89; the real close was ~1,209). Alpaca's
-`adjustment=raw` is truly raw. So on any split, the vendors differ by the
-split ratio for every pre-split date — Phase 4 must expect that rather than
-flag it.
+(NVDA 2024-06-07 shows 120.89; the real close was ~1,209) — and, as the
+backfill showed, spin-off-adjusted too (see findings below). Alpaca's
+`adjustment=raw` is truly raw. So on any split or spin-off, the vendors
+differ by that ratio for every earlier date — Phase 4 must expect that
+rather than flag it.
 
 **7 — No partitioning.** Silver grows ~40k rows/year. Date partitions would
 mean thousands of tiny files, which costs Spark more than scanning a small
@@ -83,6 +85,50 @@ small and bin-packs toward 1 GB; auto compaction (off by default) triggers at
 50 small files and targets 128 MB. Both are deferred to **Phase 3**, where a
 streaming query commits a small batch every few seconds and can't control
 file count at write time the way one batch run can.
+
+**9 — Reorganizations: visible shortcut now, lineage later.** In a
+holding-company reorganization the listed security is replaced (new FIGI;
+for XOM and BLK a new CIK too) while the ticker stays. Vendors serve the
+whole history under today's ticker, so the backfill tags pre-reorg bars with
+the successor's FIGI. Mapping them to predecessor FIGIs needs a security
+lineage table (old FIGIs, exchange ratios) the master doesn't have; that's
+Phase 5, where point-in-time identity is the subject. Until then the
+boundary is data, not folklore: `reference_data/reorganizations.py` lists
+each reorg with its SEC Form 8-K12B, loaded as `action_type='reorg'`,
+`source='sec_edgar'`, `value=NULL` (no verified ratio), with the filing's
+EDGAR acceptance time as `first_seen_at` and its accession number as
+`source_run_id`.
+
+| Security | Effective (8-K12B filed) | Accession |
+| --- | --- | --- |
+| LIN | 2023-03-01 | 0001193125-23-055949 |
+| BLK | 2024-10-01 | 0001193125-24-229601 |
+| XOM | 2026-07-01 | 0001193125-26-291990 |
+
+## Backfill findings (2021-10-06 .. 2026-10-06)
+
+All 80 securities × 1,255 sessions from both vendors; 0 bars missing.
+
+- **Splits behave as decision 6 predicted.** The Alpaca/Yahoo close ratio
+  is exactly the split ratio before a split and 1.00 after (NVDA: 10.00
+  through 2024-06-07, 1.00 from 2024-06-10). 89,858 of 100,400
+  security-days have ratio 1.00.
+- **Yahoo records spin-offs as fractional "splits"** — IBM 1.046
+  (2021-11-04), GE 1.281 (2023-01-04) and 1.253 (2024-04-02), DHR 1.128,
+  HON 1.061 and 0.9535, CMCSA 1.067, SPGI 1.057 — and adjusts its close for
+  them (GE's two compound to the 1.61 ratio seen in the data). So Yahoo's
+  `price_basis` is `vendor_adjusted`, not `split_adjusted`, and its `split`
+  rows are kept as reported: gold must classify splits vs spin-offs before
+  adjusting anything. HON's 0.9535 (a ratio below 1) needs checking first.
+- **The 1.01 ratio on 1,021 security-days is HON's two adjustments
+  compounding** (1.061 × 0.9535 = 1.0117): all of them are HON, every day
+  before 2025-10-30 (found with notebook 02). Not vendor disagreement. Still
+  unexplained: why Yahoo's 2026-06-29 HON factor is *below* 1, which raises
+  past prices.
+- **A parser change needs a rebuild, not a rerun.** Latest-wins revises only
+  on a *newer delivery*; relabelling `price_basis` meant deleting
+  `silver/daily_bars` and rebuilding it from bronze (~200k bars). That's the
+  point of keeping bronze raw.
 
 ## Joining to the security master
 

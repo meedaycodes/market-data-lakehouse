@@ -25,3 +25,6 @@ BRONZE_BARS = {
     "alpaca": f"{LAKEHOUSE_ROOT}/bronze/alpaca_bars",
     "yahoo": f"{LAKEHOUSE_ROOT}/bronze/yahoo_bars",
 }
+
+SILVER_DAILY_BARS = f"{LAKEHOUSE_ROOT}/silver/daily_bars"
+SILVER_CORPORATE_ACTIONS = f"{LAKEHOUSE_ROOT}/silver/corporate_actions"
