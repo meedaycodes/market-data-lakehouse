@@ -120,8 +120,11 @@ All 80 securities × 1,255 sessions from both vendors; 0 bars missing.
   `price_basis` is `vendor_adjusted`, not `split_adjusted`, and its `split`
   rows are kept as reported: gold must classify splits vs spin-offs before
   adjusting anything. HON's 0.9535 (a ratio below 1) needs checking first.
-- **Unexplained: a 1.01 ratio on 1,021 security-days.** First candidate for
-  Phase 4's divergence checks.
+- **The 1.01 ratio on 1,021 security-days is HON's two adjustments
+  compounding** (1.061 × 0.9535 = 1.0117): all of them are HON, every day
+  before 2025-10-30 (found with notebook 02). Not vendor disagreement. Still
+  unexplained: why Yahoo's 2026-06-29 HON factor is *below* 1, which raises
+  past prices.
 - **A parser change needs a rebuild, not a rerun.** Latest-wins revises only
   on a *newer delivery*; relabelling `price_basis` meant deleting
   `silver/daily_bars` and rebuilding it from bronze (~200k bars). That's the
